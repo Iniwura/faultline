@@ -31,7 +31,7 @@ Decision rechecks evaluate the question against current dependency state, revisi
 
 GenLayer validator functions rerun the bounded nondeterministic evaluation and require agreement on the source change enum, or on the decision outcome and affected dependency IDs. The contract validates result shape, enums, reason bounds, content hashes, dependency membership, and duplicate IDs before state changes.
 
-Only `MATERIAL_CHANGE` increments a source revision. `STILL_VALID` and `INVALIDATED__ increment a decision revision. `UNRESOLVED` fails closed and propagates safety impact without fabricating a revision.
+Only `MATERIAL_CHANGE` increments a source revision. `STILL_VALID` and `INVALIDATED` increment a decision revision. `UNRESOLVED` fails closed and propagates safety impact without fabricating a revision.
 
 The graph rejects unknown, duplicate, self-referential, over-fanout, and cyclic dependencies. Propagation and effective-state checks are bounded by explicit node/depth limits. Revision snapshots and SHA-256 fingerprints bind definitions and state transitions. `get_effective_decision_state` deterministically detects stale snapshots and unsafe upstream state without an LLM call.
 
@@ -83,7 +83,7 @@ The project has 28 passing tests covering validation, custom validator disagreem
 
 ```bash
 pytest
-genvm-lint lint contracts/faultline.py
+genvm-lint check contracts/faultline.py
 genvm-lint schema contracts/faultline.py --json
 genvm-lint typecheck contracts/faultline.py --json
 ```

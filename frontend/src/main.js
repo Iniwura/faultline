@@ -1,23 +1,16 @@
-import { createClient, chains } from "genlayer-js";
+import { createClient, isSuccessful } from "genlayer-js";
+import { studioDevnet } from "genlayer-js/chains";
+import { TransactionHashVariant } from "genlayer-js/types";
 
 const CONTRACT = "0xcdDBe68Ca04a43a50359668e654730CF328e8f03";
-const RPC = "https://studio-dev.genlayer.com/api";
 const LIVE_IDS = {
   source: "faultline-fixed-source-1789912411",
   decisionB: "faultline-fixed-decision-b-1789912411",
   decisionC: "faultline-fixed-decision-c-1789912411"
 };
 const PROOF_TX = "0x587b9e97ec6c2339707340e85ff0009cbcda49511861defb655d40c79ab0d03";
-
-const studioDev = {
-  ...chains.studionet,
-  id: 61997,
-  name: "GenLayer Studio Devnet",
-  isStudio: true,
-  rpcUrls: { default: { http: [RPC] } },
-  blockExplorers: undefined
-};
-const readClient = createClient({ chain: studioDev });
+const LATEST_NONFINAL = TransactionHashVariant.LATEST_NONFINAL;
+const readClient = createClient({ chain: studioDevnet });
 let writeClient = null;
 let walletAddress = "";
 let liveLoaded = false;
@@ -87,7 +80,13 @@ const friendlyState = (state) => {
 const stateClass = (state) => friendlyState(state).toLowerCase().replaceAll(" ", "-");
 
 async function read(method, args = []) {
-  const result = await readClient.readContract({ address: CONTRACT, functionName: method, args });
+  const result = await readClient.readContract({
+    address: CONTRACT,
+    functionName: method,
+    args,
+    jsonSafeReturn: true,
+    transactionHashVariant: LATEST_NONFINAL
+  });
   return parseContractReturn(result);
 }
 
@@ -270,7 +269,7 @@ async function connectWallet() {
   const accounts = await window.ethereum.request({ method: "eth_requestAccounts" });
   if (!accounts?.[0]) throw new Error("Wallet returned no account.");
   walletAddress = accounts[0];
-  writeClient = createClient({ chain: studioDev, account: walletAddress, provider: window.ethereum });
+  writeClient = createClient({ chain: studioDevnet, account: walletAddress, provider: window.ethereum });
   draw();
 }
 
@@ -284,6 +283,11 @@ async function submitWrite(method, args, label, afterSuccess) {
   addActivity(label, "SUBMITTED", "Waiting for Studio Dev consensus", txHash);
   draw();
   const receipt = await readClient.waitForTransactionReceipt({ hash: txHash, waitUntil: "decided", fullTransaction: true });
+  if (!isSuccessful(receipt)) {
+    const status = receipt?.statusName || receipt?.status || "UNKNOWN";
+    const execution = receipt?.txExecutionResultName || receipt?.txExecutionResult || "UNKNOWN";
+    throw new Error(`Studio Dev transaction did not finish with a return (status=${status}, execution=${execution}).`);
+  }
   const result = receipt?.txExecutionResultName || receipt?.tx_execution_result || receipt?.status || "DECIDED";
   addActivity(label, friendlyState(result), "Studio Dev consensus accepted", txHash);
   if (method === "check_source" || method === "recheck_decision") await loadLiveState(true);

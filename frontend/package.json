@@ -9,7 +9,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "genlayer-js": "1.1.8"
+    "genlayer-js": "2.0.0-rc.1"
   },
   "devDependencies": {
     "vite": "8.3.0"

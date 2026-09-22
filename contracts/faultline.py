@@ -12,6 +12,7 @@ from genlayer.types import *
 
 SCHEMA_VERSION = "faultline.v1"
 
+SOURCE_UNOBSERVED = "SOURCE_UNOBSERVED"
 SOURCE_CURRENT = "SOURCE_CURRENT"
 SOURCE_CHANGED = "SOURCE_CHANGED"
 SOURCE_UNRESOLVED = "SOURCE_UNRESOLVED"
@@ -66,6 +67,7 @@ class DecisionRecord:
     question: str
     dependencies_json: str
     dependency_revision_snapshot: str
+    depth: u256
     revision: u256
     result: str
     state: str
@@ -221,9 +223,12 @@ class Faultline(gl.contract.Contract):
     decisions: gl.storage.TreeMap[str, DecisionRecord]
     node_types: gl.storage.TreeMap[str, str]
     dependents: gl.storage.TreeMap[str, str]
+    owner_sources: gl.storage.TreeMap[str, str]
+    owner_decisions: gl.storage.TreeMap[str, str]
+    node_count: u256
 
     def __init__(self):
-        pass
+        self.node_count = 0
 
     @gl.public.write
     def register_source(self, source_id: str, url: str, tracked_claim: str) -> str:
@@ -232,6 +237,8 @@ class Faultline(gl.contract.Contract):
         tracked_claim = _validate_text(tracked_claim, MAX_CLAIM, "tracked_claim")
         if self.node_types.get(source_id, ""):
             raise gl.vm.UserError("Node id already exists.")
+        if int(self.node_count) >= MAX_PROPAGATION_NODES:
+            raise gl.vm.UserError("Graph node bound exceeded.")
 
         owner = str(gl.message.sender_address).lower()
         fingerprint = _hash(
@@ -253,16 +260,18 @@ class Faultline(gl.contract.Contract):
             revision=0,
             last_content_hash="",
             last_semantic_result=initial_result,
-            state=SOURCE_CURRENT,
+            state=SOURCE_UNOBSERVED,
             fingerprint=fingerprint,
             revision_fingerprint=revision_fingerprint,
         )
         self.node_types[source_id] = "SOURCE"
         self.dependents[source_id] = "[]"
+        self._add_owner_id(self.owner_sources, owner, source_id)
+        self.node_count = self.node_count + 1
         return json.dumps(
             {
                 "source_id": source_id,
-                "state": SOURCE_CURRENT,
+                "state": SOURCE_UNOBSERVED,
                 "revision": 0,
                 "fingerprint": fingerprint,
             },
@@ -281,6 +290,8 @@ class Faultline(gl.contract.Contract):
             raise gl.vm.UserError("Decision dependency bound exceeded.")
         if self.node_types.get(decision_id, ""):
             raise gl.vm.UserError("Node id already exists.")
+        if int(self.node_count) >= MAX_PROPAGATION_NODES:
+            raise gl.vm.UserError("Graph node bound exceeded.")
 
         canonical_dependencies: list[str] = []
         for dependency_id in dependencies:
@@ -294,6 +305,14 @@ class Faultline(gl.contract.Contract):
             canonical_dependencies.append(dependency_id)
         canonical_dependencies.sort()
         self._assert_no_cycle(decision_id, canonical_dependencies)
+
+        candidate_depth = 1
+        for dependency_id in canonical_dependencies:
+            dependency_depth = self._node_depth(dependency_id) + 1
+            if dependency_depth > candidate_depth:
+                candidate_depth = dependency_depth
+        if candidate_depth > MAX_PROPAGATION_DEPTH:
+            raise gl.vm.UserError("Decision dependency depth bound exceeded.")
 
         snapshot: dict[str, int] = {}
         for dependency_id in canonical_dependencies:
@@ -322,6 +341,7 @@ class Faultline(gl.contract.Contract):
             question=question,
             dependencies_json=dependencies_json,
             dependency_revision_snapshot=snapshot_json,
+            depth=candidate_depth,
             revision=0,
             result=result,
             state=DECISION_STALE,
@@ -332,12 +352,15 @@ class Faultline(gl.contract.Contract):
         self.dependents[decision_id] = "[]"
         for dependency_id in canonical_dependencies:
             self._add_dependent(dependency_id, decision_id)
+        self._add_owner_id(self.owner_decisions, owner, decision_id)
+        self.node_count = self.node_count + 1
 
         return json.dumps(
             {
                 "decision_id": decision_id,
                 "state": DECISION_STALE,
                 "revision": 0,
+                "depth": candidate_depth,
                 "dependencies": canonical_dependencies,
                 "fingerprint": fingerprint,
             },
@@ -362,6 +385,16 @@ class Faultline(gl.contract.Contract):
 
         content_hash = observation["content_hash"]
         semantic = observation["semantic"]
+
+        # A source has no previous fact baseline until its first successful
+        # observation. The first successful observation establishes that
+        # baseline and cannot itself represent a change from prior content.
+        if not previous_hash and semantic["change"] != UNRESOLVED:
+            semantic = {
+                "change": NO_MATERIAL_CHANGE,
+                "reason": "Initial successful observation established the source baseline.",
+            }
+
         if semantic["change"] == MATERIAL_CHANGE and previous_hash == content_hash:
             self._mark_source_unresolved(source)
             return self._source_write_result(source)
@@ -416,9 +449,11 @@ class Faultline(gl.contract.Contract):
             }
 
         if result["outcome"] == STILL_VALID and not self._dependencies_safe(dependencies):
-            raise gl.vm.UserError(
-                "A decision cannot become valid while a dependency is unsafe."
-            )
+            result = {
+                "outcome": UNRESOLVED,
+                "reason": "A decision cannot become valid while a dependency is unsafe.",
+                "affected_dependency_ids": [],
+            }
 
         result_json = _canonical(result)
         if result["outcome"] == STILL_VALID:
@@ -497,6 +532,7 @@ class Faultline(gl.contract.Contract):
                 "dependency_revision_snapshot": json.loads(
                     decision.dependency_revision_snapshot
                 ),
+                "depth": int(decision.depth),
                 "revision": int(decision.revision),
                 "result": json.loads(decision.result) if decision.result else None,
                 "state": decision.state,
@@ -522,6 +558,16 @@ class Faultline(gl.contract.Contract):
     def get_effective_decision_state(self, decision_id: str) -> str:
         self._decision(decision_id)
         return self._effective_state(decision_id, [], 0)
+
+    @gl.public.view
+    def get_owner_source_ids(self, owner: str) -> str:
+        owner = _validate_text(owner, 128, "owner").strip().lower()
+        return _canonical(self._owner_ids(self.owner_sources, owner))
+
+    @gl.public.view
+    def get_owner_decision_ids(self, owner: str) -> str:
+        owner = _validate_text(owner, 128, "owner").strip().lower()
+        return _canonical(self._owner_ids(self.owner_decisions, owner))
 
     def _source(self, source_id: str) -> SourceRecord:
         source = self.sources.get(source_id, None)
@@ -563,6 +609,26 @@ class Faultline(gl.contract.Contract):
         values.sort()
         self.dependents[node_id] = _canonical(values)
 
+    def _owner_ids(
+        self, index: gl.storage.TreeMap[str, str], owner: str
+    ) -> list[str]:
+        values = json.loads(index.get(owner, "[]"))
+        if type(values) is not list:
+            raise gl.vm.UserError("Stored owner index is invalid.")
+        return values
+
+    def _add_owner_id(
+        self, index: gl.storage.TreeMap[str, str], owner: str, node_id: str
+    ) -> None:
+        values = self._owner_ids(index, owner)
+        if node_id in values:
+            raise gl.vm.UserError("Duplicate owner index entry.")
+        if len(values) >= MAX_PROPAGATION_NODES:
+            raise gl.vm.UserError("Owner index bound exceeded.")
+        values.append(node_id)
+        values.sort()
+        index[owner] = _canonical(values)
+
     def _assert_dependencies_exist(self, dependencies: list[str]) -> None:
         for dependency_id in dependencies:
             self._require_node(dependency_id)
@@ -589,6 +655,12 @@ class Faultline(gl.contract.Contract):
         if node_type == "SOURCE":
             return int(self._source(node_id).revision)
         return int(self._decision(node_id).revision)
+
+    def _node_depth(self, node_id: str) -> int:
+        node_type = self._require_node(node_id)
+        if node_type == "SOURCE":
+            return 0
+        return int(self._decision(node_id).depth)
 
     def _current_snapshot_json(self, dependencies: list[str]) -> str:
         snapshot: dict[str, int] = {}

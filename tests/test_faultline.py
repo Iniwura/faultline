@@ -67,11 +67,28 @@ def read_decision(contract, decision_id="decision-b"):
     return json.loads(contract.get_decision(decision_id))
 
 
+def observe_current(
+    contract,
+    direct_vm,
+    sender,
+    source_id="source-a",
+    url_pattern=r"https://vendor[.]example[.]com/certification",
+    body=CURRENT_BODY,
+):
+    direct_vm.clear_mocks()
+    direct_vm.mock_web(url_pattern, {"body": body})
+    direct_vm.mock_llm(r".*", source_result("NO_MATERIAL_CHANGE"))
+    direct_vm.sender = sender
+    return json.loads(contract.check_source(source_id))
+
+
 def test_register_source_and_duplicate_rejected(direct_vm, direct_deploy, direct_alice):
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
     source = read_source(contract)
-    assert source["state"] == "SOURCE_CURRENT"
+    assert source["state"] == "SOURCE_UNOBSERVED"
+    assert source["last_content_hash"] == ""
+    assert source["last_semantic_result"] is None
     assert source["revision"] == 0
     assert source["fingerprint"] == hashlib.sha256(
         json.dumps(
@@ -138,6 +155,8 @@ def test_first_recheck_establishes_valid_state_and_full_consensus_result(
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
     create_b(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     direct_vm.sender = direct_alice
     result = json.loads(contract.recheck_decision("decision-b"))
@@ -190,6 +209,8 @@ def test_decision_outcome_disagreement_is_rejected(
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
     create_b(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     direct_vm.sender = direct_alice
     contract.recheck_decision("decision-b")
@@ -298,7 +319,9 @@ def test_material_change_increments_revision_and_marks_direct_dependent_stale(
 ):
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
     create_b(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     direct_vm.sender = direct_alice
     contract.recheck_decision("decision-b")
@@ -316,9 +339,19 @@ def test_material_change_cascades_to_grandchild_but_not_unrelated_valid_decision
     register(contract, direct_vm, direct_alice, "source-a")
     direct_vm.sender = direct_alice
     contract.register_source("source-z", "https://other.example.com/fact", "Other fact remains true.")
+    observe_current(contract, direct_vm, direct_alice, "source-a")
+    observe_current(
+        contract,
+        direct_vm,
+        direct_alice,
+        "source-z",
+        r"https://other[.]example[.]com/fact",
+        "Other fact remains true.",
+    )
     create_b(contract, direct_vm, direct_alice)
     contract.create_decision("decision-c", "The contract may proceed.", ["decision-b"])
     contract.create_decision("decision-z", "The unrelated decision remains valid.", ["source-z"])
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     contract.recheck_decision("decision-b")
     contract.recheck_decision("decision-c")
@@ -336,6 +369,7 @@ def test_invalidated_decision_propagates_stale_to_descendants(
 ):
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
     create_b(contract, direct_vm, direct_alice)
     direct_vm.sender = direct_alice
     contract.create_decision("decision-c", "The contract may proceed.", ["decision-b"])
@@ -354,7 +388,9 @@ def test_recheck_refreshes_dependency_snapshot_after_source_revision(
 ):
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
     create_b(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     direct_vm.sender = direct_alice
     contract.recheck_decision("decision-b")
@@ -374,7 +410,9 @@ def test_effective_state_detects_revision_mismatch_without_llm(
 ):
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
     create_b(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     direct_vm.sender = direct_alice
     contract.recheck_decision("decision-b")
@@ -435,20 +473,85 @@ def test_network_or_model_failure_is_unresolved_and_never_success(
     assert source_result_value["revision"] == 0
 
 
-def test_propagation_depth_bound_is_enforced(
+def test_deep_graph_is_rejected_at_admission_before_propagation_can_fail(
     direct_vm, direct_deploy, direct_alice
 ):
     contract = deploy(direct_deploy)
     register(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
     direct_vm.sender = direct_alice
+
     previous = "source-a"
-    for index in range(34):
+    for index in range(32):
         decision_id = "chain-" + str(index)
-        contract.create_decision(decision_id, "A bounded chain decision.", [previous])
+        created = json.loads(
+            contract.create_decision(
+                decision_id,
+                "A bounded chain decision.",
+                [previous],
+            )
+        )
+        assert created["depth"] == index + 1
         previous = decision_id
-    mock_source(direct_vm, CHANGED_BODY, source_result("MATERIAL_CHANGE", "Changed."))
-    with direct_vm.expect_revert("depth exceeded"):
-        contract.check_source("source-a")
+
+    with direct_vm.expect_revert("depth bound exceeded"):
+        contract.create_decision(
+            "chain-32",
+            "This node would exceed the safe propagation depth.",
+            ["chain-31"],
+        )
+
+    assert json.loads(contract.get_dependents("chain-31")) == []
+
+    mock_source(
+        direct_vm,
+        CHANGED_BODY,
+        source_result("MATERIAL_CHANGE", "Changed."),
+    )
+    direct_vm.sender = direct_alice
+    result = json.loads(contract.check_source("source-a"))
+    assert result["state"] == "SOURCE_CHANGED"
+    assert result["revision"] == 1
+
+
+def test_broad_graph_material_change_propagates_without_revert(
+    direct_vm, direct_deploy, direct_alice
+):
+    contract = deploy(direct_deploy)
+    register(contract, direct_vm, direct_alice)
+    observe_current(contract, direct_vm, direct_alice)
+    direct_vm.sender = direct_alice
+
+    for index in range(32):
+        contract.create_decision(
+            "wide-" + str(index),
+            "A broad graph decision.",
+            ["source-a"],
+        )
+
+    direct_vm.clear_mocks()
+    direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
+    for index in range(32):
+        contract.recheck_decision("wide-" + str(index))
+
+    with direct_vm.expect_revert("fanout bound exceeded"):
+        contract.create_decision(
+            "wide-overflow",
+            "This edge would exceed the fanout bound.",
+            ["source-a"],
+        )
+
+    mock_source(
+        direct_vm,
+        CHANGED_BODY,
+        source_result("MATERIAL_CHANGE", "Changed."),
+    )
+    direct_vm.sender = direct_alice
+    result = json.loads(contract.check_source("source-a"))
+    assert result["state"] == "SOURCE_CHANGED"
+
+    for index in range(32):
+        assert read_decision(contract, "wide-" + str(index))["state"] == "DECISION_STALE"
 
 
 def test_fingerprints_are_deterministic_and_bind_revision_result(
@@ -475,6 +578,8 @@ def test_documented_three_node_demo_flow(
     direct_vm.sender = direct_alice
     contract.create_decision("decision-b", "Vendor X is approved for procurement.", ["source-a"])
     contract.create_decision("decision-c", "The contract with Vendor X may proceed.", ["decision-b"])
+    observe_current(contract, direct_vm, direct_alice)
+    direct_vm.clear_mocks()
     direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
     contract.recheck_decision("decision-b")
     contract.recheck_decision("decision-c")
@@ -492,3 +597,76 @@ def test_documented_three_node_demo_flow(
     contract.recheck_decision("decision-b")
     assert read_decision(contract, "decision-b")["state"] == "DECISION_INVALIDATED"
     assert read_decision(contract, "decision-c")["effective_state"] == "DECISION_STALE"
+
+
+def test_creator_indexes_expose_created_records(
+    direct_vm, direct_deploy, direct_alice
+):
+    contract = deploy(direct_deploy)
+    owner = "0x" + direct_alice.hex()
+
+    register(contract, direct_vm, direct_alice, "owned-source")
+    direct_vm.sender = direct_alice
+    contract.create_decision(
+        "owned-decision",
+        "A creator-owned record can be rediscovered.",
+        ["owned-source"],
+    )
+
+    assert json.loads(contract.get_owner_source_ids(owner.upper())) == [
+        "owned-source"
+    ]
+    assert json.loads(contract.get_owner_decision_ids(owner.upper())) == [
+        "owned-decision"
+    ]
+
+    source = json.loads(contract.get_source("owned-source"))
+    decision = json.loads(contract.get_decision("owned-decision"))
+
+    assert source["source_id"] == "owned-source"
+    assert source["owner"] == owner
+    assert decision["decision_id"] == "owned-decision"
+    assert decision["owner"] == owner
+
+
+def test_unobserved_source_cannot_support_valid_decision(
+    direct_vm, direct_deploy, direct_alice
+):
+    contract = deploy(direct_deploy)
+    register(contract, direct_vm, direct_alice)
+    create_b(contract, direct_vm, direct_alice)
+
+    direct_vm.mock_llm(r".*", decision_result("STILL_VALID"))
+    direct_vm.sender = direct_alice
+
+    result = json.loads(contract.recheck_decision("decision-b"))
+
+    assert read_source(contract)["state"] == "SOURCE_UNOBSERVED"
+    assert result["state"] == "DECISION_UNRESOLVED"
+    assert result["effective_state"] == "DECISION_UNRESOLVED"
+    assert result["revision"] == 0
+
+
+def test_graph_node_bound_is_enforced_at_admission(
+    direct_vm, direct_deploy, direct_alice
+):
+    contract = deploy(direct_deploy)
+    direct_vm.sender = direct_alice
+
+    for index in range(128):
+        contract.register_source(
+            f"bounded-source-{index}",
+            SOURCE_URL,
+            "Vendor X maintains ISO 27001 certification.",
+        )
+
+    assert int(contract.node_count) == 128
+
+    with direct_vm.expect_revert("Graph node bound exceeded"):
+        contract.register_source(
+            "bounded-source-overflow",
+            SOURCE_URL,
+            "Vendor X maintains ISO 27001 certification.",
+        )
+
+    assert int(contract.node_count) == 128

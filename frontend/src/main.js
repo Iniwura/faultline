@@ -1,6 +1,7 @@
 import { createClient, isSuccessful } from "genlayer-js";
 import { studioDevnet } from "genlayer-js/chains";
 import { TransactionHashVariant } from "genlayer-js/types";
+import { refreshOwnerRecords } from "./records.js";
 
 const CONTRACT = "0xcdDBe68Ca04a43a50359668e654730CF328e8f03";
 const LIVE_IDS = {
@@ -21,8 +22,8 @@ let flash = null;
 let activityLog = [
   { label: "Source check", result: "NO IMPORTANT CHANGE", detail: "IANA Example Domains", tx: PROOF_TX, time: "Verified live" }
 ];
-const sessionSources = [];
-const sessionDecisions = [];
+let userSources = [];
+let userDecisions = [];
 
 let liveState = {
   source: {
@@ -69,6 +70,7 @@ const friendlyState = (state) => {
   const value = String(state ?? "");
   if (value.includes("INVALIDATED")) return "INVALIDATED";
   if (value.includes("UNRESOLVED")) return "UNRESOLVED";
+  if (value.includes("UNOBSERVED")) return "UNOBSERVED";
   if (value.includes("STALE")) return "NEEDS RECHECK";
   if (value.includes("CHANGED")) return "CHANGED";
   if (value.includes("CURRENT")) return "CURRENT";
@@ -88,6 +90,25 @@ async function read(method, args = []) {
     transactionHashVariant: LATEST_NONFINAL
   });
   return parseContractReturn(result);
+}
+
+async function refreshUserRecords() {
+  const records = await refreshOwnerRecords({
+    read,
+    owner: walletAddress
+  });
+
+  userSources = records.sources.map((item) => ({
+    ...item,
+    friendly: friendlyState(item.state)
+  }));
+
+  userDecisions = records.decisions.map((item) => ({
+    ...item,
+    friendly: friendlyState(item.state)
+  }));
+
+  return records;
 }
 
 async function loadLiveState(force = false) {
@@ -155,8 +176,21 @@ function overview() {
   return `${appNav("overview")}<main class="app-page"><section class="app-intro overview-intro"><div class="eyebrow">Faultline</div><h1>Dependency workspace</h1><p>Track the facts your decisions rely on, then recheck only what changed.</p></section><section class="app-content"><div class="question-block"><div><span class="section-number">What do you want to do?</span></div><div class="choice-grid"><a class="choice" href="/app/sources?new=1"><span>01</span><strong>Track a new source</strong><small>Add a public fact to monitor.</small></a><a class="choice" href="/app/decisions?new=1"><span>02</span><strong>Create a decision</strong><small>Connect a choice to its dependencies.</small></a></div></div><div class="app-section-head"><span class="section-number">01 / Your graph</span><a href="/app/sources">View sources ↗</a></div>${graphOverview()}<div class="app-section-head recent-head"><span class="section-number">02 / Recent activity</span><a href="/app/activity">View all activity ↗</a></div>${activityMarkup(3)}</section></main>${footer()}`;
 }
 
-function sourceItems() { return [liveState.source, ...sessionSources]; }
-function decisionItems() { return [liveState.decisionB, liveState.decisionC, ...sessionDecisions]; }
+function sourceItems() {
+  return [
+    liveState.source,
+    ...userSources.filter((item) => item.id !== liveState.source.id)
+  ];
+}
+
+function decisionItems() {
+  const liveIds = new Set([liveState.decisionB.id, liveState.decisionC.id]);
+  return [
+    liveState.decisionB,
+    liveState.decisionC,
+    ...userDecisions.filter((item) => !liveIds.has(item.id))
+  ];
+}
 function dependentCount(id) { return decisionItems().filter((item) => (item.dependencies || []).includes(id)).length; }
 function emptyState(title, copy, href, label) { return `<div class="empty-state"><h3>${title}</h3><p>${copy}</p><a class="button ink-button" href="${href}">${label}</a></div>`; }
 
@@ -182,7 +216,12 @@ function findSource(id) { return sourceItems().find((item) => item.id === id); }
 function findDecision(id) { return decisionItems().find((item) => item.id === id); }
 
 function sourceDetail(id) {
-  const item = findSource(id) || liveState.source;
+  const item = findSource(id);
+
+  if (!item) {
+    return `${appNav("sources")}<main class="app-page"><section class="app-intro compact"><div class="eyebrow">Source detail</div><div class="back-link"><a href="/app/sources">← Sources</a></div><h1>Source not found</h1><p>${walletAddress ? "This source could not be read from the connected wallet's contract records." : "Connect the wallet that created this source to load its contract record."}</p>${walletAddress ? "" : '<button class="button primary" type="button" data-connect-wallet>Connect wallet</button>'}</section></main>${footer()}`;
+  }
+
   const dependents = decisionItems().filter((decision) => (decision.dependencies || []).includes(id));
   return `${appNav("sources")}<main class="app-page"><section class="app-intro compact"><div class="eyebrow">Source detail</div><div class="back-link"><a href="/app/sources">← Sources</a></div><h1>${esc(item.title || item.claim || "Source")}</h1><p>${esc(item.claim || item.tracked_claim || "Public fact being monitored")}</p></section><section class="app-content detail-content"><div class="detail-grid"><div><span class="detail-label">Status</span><strong class="big-state ${stateClass(item.friendly || friendlyState(item.state))}">${esc(item.friendly || friendlyState(item.state))}</strong></div><div><span class="detail-label">Revision</span><strong class="detail-value">${esc(item.revision ?? 0)}</strong></div><div class="wide-detail"><span class="detail-label">Public URL</span><a class="detail-url" href="${esc(item.url)}" target="_blank" rel="noreferrer">${esc(item.url || "No public URL")}</a></div></div><div class="detail-action-row"><button class="button ink-button" type="button" data-detail-action="check_source" data-detail-id="${esc(item.id)}">Check for change ↗</button><span class="form-note">GenLayer compares the current source against the tracked claim.</span></div><div class="detail-section"><div class="app-section-head"><span class="section-number">01 / Dependent decisions</span></div>${dependents.length ? `<div class="chain-list">${dependents.map((decision) => `<a href="/app/decision/${encodeURIComponent(decision.id)}"><span>Decision</span><strong>${esc(decision.title || decision.question)}</strong><b class="state ${stateClass(decision.friendly || friendlyState(decision.state))}">${esc(decision.friendly || friendlyState(decision.state))}</b></a>`).join("")}</div>` : emptyState("No dependent decisions yet", "Create a decision and connect it to this source.", `/app/decisions?new=1&dependency=${encodeURIComponent(item.id)}`, "Create a decision")}</div>${protocolDetails(item, item.id, "source")}</section></main>${footer()}`;
 }
@@ -211,7 +250,12 @@ function decisionsPage() {
 }
 
 function decisionDetail(id) {
-  const item = findDecision(id) || liveState.decisionB;
+  const item = findDecision(id);
+
+  if (!item) {
+    return `${appNav("decisions")}<main class="app-page"><section class="app-intro compact"><div class="eyebrow">Decision detail</div><div class="back-link"><a href="/app/decisions">← Decisions</a></div><h1>Decision not found</h1><p>${walletAddress ? "This decision could not be read from the connected wallet's contract records." : "Connect the wallet that created this decision to load its contract record."}</p>${walletAddress ? "" : '<button class="button primary" type="button" data-connect-wallet>Connect wallet</button>'}</section></main>${footer()}`;
+  }
+
   const dependencies = (item.dependencies || []).map((depId) => findSource(depId) || findDecision(depId)).filter(Boolean);
   const state = item.friendly || friendlyState(item.state);
   return `${appNav("decisions")}<main class="app-page"><section class="app-intro compact"><div class="eyebrow">Decision detail</div><div class="back-link"><a href="/app/decisions">← Decisions</a></div><h1>${esc(item.title || item.question || "Decision")}</h1><p>${esc(item.question || "Decision with a dependency chain")}</p></section><section class="app-content detail-content"><div class="detail-grid"><div><span class="detail-label">Current status</span><strong class="big-state ${stateClass(state)}">${esc(state)}</strong></div><div><span class="detail-label">Revision</span><strong class="detail-value">${esc(item.revision ?? 0)}</strong></div><div class="wide-detail"><span class="detail-label">Why this decision may be stale</span><p class="detail-explanation">${state === "VALID" ? "All tracked dependencies currently match the decision snapshot." : "One or more upstream dependencies changed. Recheck this decision to establish a fresh result."}</p></div></div><div class="detail-action-row"><button class="button ink-button" type="button" data-detail-action="recheck_decision" data-detail-id="${esc(item.id)}">Recheck decision ↗</button><span class="form-note">Only the current dependency snapshot is evaluated.</span></div><div class="detail-section"><div class="app-section-head"><span class="section-number">01 / Dependency chain</span></div><div class="chain-list">${dependencies.map((dependency) => `<a href="${dependency.id === LIVE_IDS.source || sourceItems().some((source) => source.id === dependency.id) ? `/app/source/${encodeURIComponent(dependency.id)}` : `/app/decision/${encodeURIComponent(dependency.id)}`}"><span>${dependency.id === LIVE_IDS.source || sourceItems().some((source) => source.id === dependency.id) ? "Source" : "Decision"}</span><strong>${esc(dependency.title || dependency.question)}</strong><b class="state ${stateClass(dependency.friendly || friendlyState(dependency.state))}">${esc(dependency.friendly || friendlyState(dependency.state))}</b></a>`).join("")}<div class="chain-arrow">↓</div><div class="chain-current"><span>Decision</span><strong>${esc(item.title || item.question)}</strong><b class="state ${stateClass(state)}">${esc(state)}</b></div></div></div>${protocolDetails(item, item.id)}</section></main>${footer()}`;
@@ -270,6 +314,7 @@ async function connectWallet() {
   if (!accounts?.[0]) throw new Error("Wallet returned no account.");
   walletAddress = accounts[0];
   writeClient = createClient({ chain: studioDevnet, account: walletAddress, provider: window.ethereum });
+  await refreshUserRecords();
   draw();
 }
 
@@ -290,8 +335,14 @@ async function submitWrite(method, args, label, afterSuccess) {
   }
   const result = receipt?.txExecutionResultName || receipt?.tx_execution_result || receipt?.status || "DECIDED";
   addActivity(label, friendlyState(result), "Studio Dev consensus accepted", txHash);
-  if (method === "check_source" || method === "recheck_decision") await loadLiveState(true);
-  if (afterSuccess) afterSuccess(txHash, result);
+
+  if (method === "check_source" || method === "recheck_decision") {
+    await loadLiveState(true);
+  }
+
+  await refreshUserRecords();
+
+  if (afterSuccess) await afterSuccess(txHash, result);
 }
 
 function handleOperation(form) {
@@ -303,16 +354,22 @@ function handleOperation(form) {
   if (button) { button.disabled = true; button.textContent = "Working…"; }
   submitWrite(method, args, method === "register_source" ? "Track source" : "Create decision", () => {
     if (method === "register_source") {
-      sessionSources.unshift({ id: values.source_id, title: values.tracked_claim.slice(0, 52), claim: values.tracked_claim, tracked_claim: values.tracked_claim, url: values.url, state: "SOURCE_CURRENT", friendly: "CURRENT", revision: 0 });
-      flash = { type: "source", id: values.source_id, message: "Your source is now part of the graph." };
+      flash = {
+        type: "source",
+        id: values.source_id,
+        message: "Your source was read back from the contract."
+      };
       window.history.replaceState({}, "", `/app/sources?created=${encodeURIComponent(values.source_id)}`);
     } else {
-      sessionDecisions.unshift({ id: values.decision_id, title: values.question.slice(0, 52), question: values.question, state: "DECISION_STALE", friendly: "NEEDS RECHECK", revision: 0, dependencies });
       flash = { type: "decision", id: values.decision_id };
       window.history.replaceState({}, "", `/app/decisions?created=${encodeURIComponent(values.decision_id)}`);
     }
+
     draw();
-  }).catch((error) => { addActivity(method, "ERROR", error?.message || String(error)); draw(); });
+  }).catch((error) => {
+    addActivity(method, "ERROR", error?.message || String(error));
+    draw();
+  });
 }
 
 function bindInteractions(route) {

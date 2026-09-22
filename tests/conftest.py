@@ -14,8 +14,8 @@ from gltest.direct.vm import VMContext, _sentinel
 
 
 STUDIO_DEV_RUNNER_HASH = "5jycge4q8k23462jtb0b9fyey1s9qz928sz2nbrd9mg4sxqg2qng"
-STUDIO_DEV_CACHE = Path(
-    r"\\wsl.localhost\Ubuntu\home\ini\.cache\gltest-direct\extracted\vstudio-dev"
+STUDIO_DEV_CACHE = (
+    Path.home() / ".cache" / "gltest-direct" / "extracted" / "vstudio-dev"
 )
 
 

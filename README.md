@@ -38,7 +38,7 @@ The graph rejects unknown, duplicate, self-referential, over-fanout, and cyclic 
 States:
 
 ```
-SOURCE_CURRENT  SOURCE_CHANGED  SOURCE_UNRESOLVED
+SOURCE_UNOBSERVED  SOURCE_CURRENT  SOURCE_CHANGED  SOURCE_UNRESOLVED
 DECISION_VALID  DECISION_STALE  DECISION_INVALIDATED  DECISION_UNRESOLVED
 ```
 
@@ -47,12 +47,12 @@ DECISION_VALID  DECISION_STALE  DECISION_INVALIDATED  DECISION_UNRESOLVED
 ```
 Network:       GenLayer Studio Dev
 RPC:           https://studio-dev.genlayer.com/api
-Contract:      0xcdDBe68Ca04a43a50359668e654730CF328e8f03
-Deploy tx:     0xfc37e89130a81ba5aacb1c43a27b87c541e755b134b17a96ac02104d9c1b4c84
-Source SHA256: 2e58b15b9ae475f837f54eb1d4c82ea7f139a7911794489a80ab8cdfa24ff4c7
+Contract:      0x5516Cd4ed18bAE5ADCA01908366c49bFC8612F00
+Deploy tx:     0xd487058e82eae40b1567c8222dc0e06cc42920f47634dc1355632f11910f6c03
+Source SHA256: 3f7d3969dc539f266635d18a1f4bdf716a372482bab32fce530730c2f05f655b
 ```
 
-The authoritative contract source is [`contracts/faultline.py`](contracts/faultline.py). The public schema exposes 9 methods: 4 writes and 5 reads.
+The authoritative contract source is [`contracts/faultline.py`](contracts/faultline.py). The public schema exposes 11 methods: 4 writes and 7 reads, including creator indexes for sources and decisions.
 
 ## Live proof
 
@@ -62,24 +62,28 @@ The final live proof is a three-node `SOURCE → B → C` chain:
 Source:      faultline-fixed-source-1789912411
 URL:         https://www.iana.org/help/example-domains
 Claim:       IANA maintains example domains such as example.com and example.org for documentation purposes.
-Check tx:    0x587b9e97ec6c2339707340e85ff0009cbcda49511861defb655d40c79ab0d03
-Result:      NO_MATERIAL_CHANGE
-State:       SOURCE_CURRENT
+Baseline:    NO_MATERIAL_CHANGE
+State:       SOURCE_CURRENT / revision 0
 
 Decision B:  faultline-fixed-decision-b-1789912411
-Recheck tx:  0x136da70e5b007ac168631412def3ee447d99bf5184117a7168e0b1f768f21c11
+Depth:       1
+Proof tx:    0x347b6fd885b0e4fe69a63a3bbfcaf91747ee247db8228b62c557b5bf754efe35
 State:       DECISION_VALID / revision 1
 
 Decision C:  faultline-fixed-decision-c-1789912411
-Recheck tx:  0xf259da9a5f42a6963851f8763827d0e5e42a8426b2a00d8ef746ef025a753553
+Depth:       2
 State:       DECISION_VALID / revision 1
 ```
 
-This proof did **not** produce a live `MATERIAL_CHANGE`. The material-change cascade is covered deterministically by the test suite.
+The source was first registered as `SOURCE_UNOBSERVED`. Its first successful observation established the baseline deterministically as `NO_MATERIAL_CHANGE` without incrementing the revision.
+
+The frontend owner-index path was exercised live against this deployment: it discovered the source and both decisions from the connected wallet, then read their canonical records back from the contract.
+
+This proof did **not** produce a live `MATERIAL_CHANGE`. Deep-graph, broad-graph, admission-bound, unobserved-source, and material-change propagation behavior are covered deterministically by the executable test suite.
 
 ## Verification
 
-The project has 28 passing tests covering validation, custom validator disagreement, cycle protection, revision snapshots, effective states, unresolved results, propagation, and the three-node demo flow.
+The contract suite has 32 passing tests covering validation, validator disagreement, initial unobserved source state, cycle protection, revision snapshots, effective states, unresolved results, deep and broad dependency graphs, admission limits, propagation, creator indexes, and the three-node demo flow. The frontend record-refresh suite has 3 passing tests.
 
 ```bash
 pytest
@@ -95,8 +99,9 @@ The frontend keeps the contract address and Studio Dev RPC in `frontend/src/main
 ```bash
 cd frontend
 npm install
+npm test
 npm run dev
 npm run build
 ```
 
-The frontend reads the live fixture, connects an EIP-1193 wallet for writes, preserves transaction handling, and includes the reviewer/live simulation route. Simulation is local-only and does not write on-chain.
+The frontend reads the live fixture, connects an EIP-1193 wallet for writes, and refreshes user-created sources and decisions from the contract owner indexes instead of relying on synthetic local records. It preserves transaction handling and includes the reviewer/live simulation route. Simulation is local-only and does not write on-chain.

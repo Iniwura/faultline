@@ -3,13 +3,13 @@ import { studioDevnet } from "genlayer-js/chains";
 import { TransactionHashVariant } from "genlayer-js/types";
 import { refreshOwnerRecords } from "./records.js";
 
-const CONTRACT = "0xcdDBe68Ca04a43a50359668e654730CF328e8f03";
+const CONTRACT = "0x5516Cd4ed18bAE5ADCA01908366c49bFC8612F00";
 const LIVE_IDS = {
   source: "faultline-fixed-source-1789912411",
   decisionB: "faultline-fixed-decision-b-1789912411",
   decisionC: "faultline-fixed-decision-c-1789912411"
 };
-const PROOF_TX = "0x587b9e97ec6c2339707340e85ff0009cbcda49511861defb655d40c79ab0d03";
+const PROOF_TX = "0x347b6fd885b0e4fe69a63a3bbfcaf91747ee247db8228b62c557b5bf754efe35";
 const LATEST_NONFINAL = TransactionHashVariant.LATEST_NONFINAL;
 const readClient = createClient({ chain: studioDevnet });
 let writeClient = null;
@@ -20,7 +20,7 @@ let simulationOn = false;
 let selectedNode = "source";
 let flash = null;
 let activityLog = [
-  { label: "Source check", result: "NO IMPORTANT CHANGE", detail: "IANA Example Domains", tx: PROOF_TX, time: "Verified live" }
+  { label: "Decision recheck", result: "VALID", detail: "Vendor X procurement decision", tx: PROOF_TX, time: "Verified live" }
 ];
 let userSources = [];
 let userDecisions = [];
